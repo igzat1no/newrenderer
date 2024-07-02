@@ -1,10 +1,50 @@
-import torch
-from kornia.utils.grid import create_meshgrid
 import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from kornia.utils.grid import create_meshgrid
 
 
 def same_hemisphere(W1, W2):
     return W1[..., 2] * W2[..., 2] > 0
+
+
+def Reflect(v, n):
+    return -v + 2 * torch.sum(v * n, dim=-1, keepdim=True) * n
+
+
+def world2local(v, normal):
+    """ convert world coordinate to local coordinate
+    Args:
+        v: Bx3 world coordinate
+        normal: Bx3 normal
+    Return:
+        v_local: Bx3 local coordinate
+    """
+    nw = torch.tensor([0, 0, 1], dtype=torch.float32, device=v.device).expand_as(v)
+    flag = (normal == nw)
+    if flag.sum() > 0:
+        nw[flag] = torch.tensor([0, 1, 0], dtype=torch.float32, device=v.device).expand_as(nw[flag])
+    tangent = F.normalize(torch.cross(normal, nw, dim=-1), dim=-1)
+    bitangent = torch.cross(normal, tangent, dim=-1)
+    ret = torch.stack([torch.einsum("bi,bi->b", v, tangent),
+                        torch.einsum("bi,bi->b", v, bitangent),
+                        torch.einsum("bi,bi->b", v, normal)], dim=-1)
+    return F.normalize(ret, dim=-1), tangent, bitangent
+
+
+def local2world(v, normal, tangent, bitangent):
+    """ convert local coordinate to world coordinate
+    Args:
+        v: Bx3 local coordinate
+        normal: Bx3 normal
+        tangent: Bx3 tangent
+        bitangent: Bx3 bitangent
+    Return:
+        v_world: Bx3 world coordinate
+    """
+    return v[:, 0:1] * tangent + v[:, 1:2] * bitangent + v[:, 2:3] * normal
 
 
 def double_sided(V,N):
@@ -54,7 +94,7 @@ def get_ray_directions(H, W, focal):
 
 def get_rays(directions, c2w, focal=None):
     R = c2w[:3, :3]
-    rays_d = directions @ R.T  # (H, W, 3)
+    rays_d = directions @ R  # (H, W, 3)
     rays_o = c2w[:3, 3].expand(rays_d.shape)  # (H, W, 3)
 
     rays_d = rays_d.view(-1, 3)
@@ -113,6 +153,42 @@ def linear2srgb_torch(tensor_0to1):
     tensor_srgb = where_func(is_linear, tensor_linear, tensor_nonlinear)
 
     return tensor_srgb
+
+
+def GGX_specular(
+        normal,
+        pts2c,
+        pts2l,
+        roughness,
+        fresnel
+):
+    L = F.normalize(pts2l, dim=-1)  # [nrays, nlights, 3]
+    V = F.normalize(pts2c, dim=-1)  # [nrays, 3]
+    H = F.normalize((L + V[:, None, :]) / 2.0, dim=-1)  # [nrays, nlights, 3]
+    N = F.normalize(normal, dim=-1)  # [nrays, 3]
+
+    NoV = torch.sum(V * N, dim=-1, keepdim=True)  # [nrays, 1]
+    N = N * NoV.sign()  # [nrays, 3]
+
+    NoL = torch.sum(N[:, None, :] * L, dim=-1, keepdim=True).clamp_(1e-6, 1)  # [nrays, nlights, 1] TODO check broadcast
+    NoV = torch.sum(N * V, dim=-1, keepdim=True).clamp_(1e-6, 1)  # [nrays, 1]
+    NoH = torch.sum(N[:, None, :] * H, dim=-1, keepdim=True).clamp_(1e-6, 1)  # [nrays, nlights, 1]
+    VoH = torch.sum(V[:, None, :] * H, dim=-1, keepdim=True).clamp_(1e-6, 1)  # [nrays, nlights, 1]
+
+    alpha = roughness * roughness  # [nrays, 3]
+    alpha2 = alpha * alpha  # [nrays, 3]
+    k = (alpha + 2 * roughness + 1.0) / 8.0
+    FMi = ((-5.55473) * VoH - 6.98316) * VoH
+    frac0 = fresnel[:, None, :] + (1 - fresnel[:, None, :]) * torch.pow(2.0, FMi)  # [nrays, nlights, 3]
+
+    frac = frac0 * alpha2[:, None, :]  # [nrays, 1]
+    nom0 = NoH * NoH * (alpha2[:, None, :] - 1) + 1
+
+    nom1 = NoV * (1 - k) + k
+    nom2 = NoL * (1 - k[:, None, :]) + k[:, None, :]
+    nom = (4 * np.pi * nom0 * nom0 * nom1[:, None, :] * nom2).clamp_(1e-6, 4 * np.pi)
+    spec = frac / nom
+    return spec
 
 
 if __name__ == '__main__':

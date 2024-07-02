@@ -40,3 +40,11 @@ def SampleUniformSphere(sample2):
     r = (1 - z * z).clamp(min=1e-8).sqrt()
     phi = 2 * math.pi * sample2[:, 1]
     return torch.stack([r * phi.cos(), r * phi.sin(), z], dim=-1)
+
+
+def SampleUniformHemisphere(sample2):
+    z = sample2[:, 0]
+    r = (1 - z * z).clamp(min=1e-8).sqrt()
+    phi = 2 * math.pi * sample2[:, 1]
+    return torch.stack([r * phi.cos(), r * phi.sin(), z], dim=-1)
+

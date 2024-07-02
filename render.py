@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 from render_utils import *
 from material import *
+from math_utils import *
+from light import *
 
 mi.set_variant("cuda_ad_rgb")
 
@@ -32,6 +34,7 @@ def ray_intersect(scene, xs, ds):
     ret = ret.compute_surface_interaction(rays_mi)
 
     positions = ret.p.torch()
+    # normals = positions.clone() * 0.5
     normals = ret.n.torch()
     normals = F.normalize(normals, dim=-1)
     normals = double_sided(-ds, normals)
@@ -45,6 +48,7 @@ def ray_intersect(scene, xs, ds):
 
 def path_tracing(scene,
                  material,
+                 light,
                  rays_o,
                  rays_d,
                  dx_du,
@@ -70,8 +74,9 @@ def path_tracing(scene,
 
     # sample camera ray
     du, dv = torch.rand(2, len(rays_o), spp, 1, device=device) - 0.5
-    wi = F.normalize(rays_d[:, None] + dx_du[:, None] * du + dy_dv[:, None] * dv,
-                     dim=-1).reshape(-1, 3)
+    rays_d = -rays_d # rays_d points to camera, -rays_d points to object
+    rays_d = F.normalize(rays_d[:, None] + dx_du[:, None] * du + dy_dv[:, None] * dv,
+                         dim=-1).reshape(-1, 3)
     position = rays_o.repeat_interleave(spp, 0)
 
     B = len(position)
@@ -89,82 +94,66 @@ def path_tracing(scene,
     # torch.autograd.set_detect_anomaly(True)
     positions = None # for validation
 
-    if True:
-        for d in range(0, indir_depth):
-            with torch.no_grad():
-                new_position, normal, _, _, vis = ray_intersect(
-                    scene, position + mi.math.RayEpsilon * wi, wi)
+    with torch.no_grad():
+        if True:
+            for d in range(0, indir_depth):
+                with torch.no_grad():
+                    new_position, normal, _, _, valid = ray_intersect(
+                        scene, position + mi.math.RayEpsilon * rays_d, rays_d)
 
-            if validate:
-                if d == 0:
-                    positions = new_position
+                if validate:
+                    if d == 0:
+                        positions = new_position
 
-            normal = material["neural_tex"].net.renderModule_normal(
-                nw_position, intrinsic_feat)
-            normal = double_sided(-wi, normal)
-            normal = F.normalize(normal, dim=-1, eps=1e-6)
+                # outgoing rays
+                invalid = ~valid
+                nw_coloring = active.clone()
+                nw_coloring[active.clone()] = invalid # rays going outside in this depth
+                active[active.clone()] = valid # remaining rays
 
-            nw_colored = active.clone()
-            nw_colored[nw_colored.clone()] = ~vis
-            active[active.clone()] = vis
-            if d != 0:
-                if True:
-                    # with torch.no_grad():
-                    # calculate the color of the light
-                    position = position[~vis]
-                    nw_wi = wi[~vis]  # [bs, 3]
-                    # find the corresponding light on environment map using nw_wi
-                    cosine = (nw_wi[:, None] * incident_light_dirs).sum(
-                        -1)  # [bs, envW * envH]
-                    # print(cosine.max(), cosine.min())
-                    # exit(0)
-                    indices = cosine.argmax(-1)  # [bs]
-                    light_rgbs = envir_map_light_rgbs[indices]  # [bs, 3]
-                    light_weight_nw = light_area_weight[indices]  # [bs]
-                    light_weight_nw = torch.stack(
-                        [light_weight_nw, light_weight_nw, light_weight_nw], dim=-1)
-                    # calculate the surface color
-                    surface_brdf = nw_brdf[~vis]
-                    tmp_ind = torch.arange(len(surface_brdf), device=device)
-                    cosine = cosine[tmp_ind, indices]
-                    cosine = torch.stack([cosine, cosine, cosine], dim=-1)
-                    # light_rgbs = light_rgbs * cosine
-                    L[nw_colored] += surface_brdf * light_rgbs  # * cosine #* light_weight_nw
+                outgoing_dir = rays_d[invalid]
+                rays_d = rays_d[valid]
+                L[nw_coloring] += beta[invalid] * light.Le(outgoing_dir)
 
-            if not active.any():
-                break
+                if not active.any():
+                    break
 
-            wo = -wi
-            position = new_position[vis]
-            wo = wo[vis]
-            normal = normal[vis]
-            nw_brdf = nw_brdf[vis]
-            B = len(position)
+                wo = -rays_d
+                position = new_position[valid]
+                normal = normal[valid]
+                beta = beta[valid]
+                B = len(position)
 
-            # mat = material["neural_tex"].sample(position, wo)
-            # if validate:
-            #     if d == 0:
-            #         albedo[vis] = mat["albedo"]
+                if False:
+                    # sampleBSDF
+                    u = torch.rand(B, device=device)
+                    u2 = torch.rand(B, 2, device=device)
+                    wo, t1, t2 = world2local(wo, normal)
+                    bs = mat.Sample_f(wo, u, u2)
+                    bs.wi = local2world(bs.wi, normal, t1, t2)
+                    # dot_prod = torch.einsum("bi,bi->b", bs.wi, normal).unsqueeze(1)
+                    dot_prod = Dot(bs.wi, normal)
+                    beta *= bs.f * dot_prod.abs() / bs.pdf
+                    wi = bs.wi
+                else:
+                    # uniformly sample sphere
+                    u2 = torch.rand(B, 2, device=device)
+                    nw_wo, t1, t2 = world2local(wo, normal)
+                    wi = SampleUniformHemisphere(u2)
+                    f = mat.f(nw_wo, wi)
+                    wi = local2world(wi, normal, t1, t2)
+                    pdf = torch.tensor(0.5 / math.pi, device=device).repeat(wi.shape[0], 1)
+                    # dot_prod = torch.einsum("bi,bi->b", wi, normal)
+                    dot_prod = Dot(wi, normal)
+                    beta *= f * dot_prod.abs().unsqueeze(1) / pdf
 
-            # breakpoint()
-            sample1 = torch.rand(B, device=device)
-            # sample2 = torch.rand(B, 2, device=device)
-
-            sample2 = torch.rand(B, 2, device=device)
-            wi = SampleCosineHemisphere(sample2)
-            wi[(wi * normal).sum(-1) < 0, 2] *= -1
-            # pdf = CosineHemispherePDF(AbsCosTheta(wi))
-            # specular = GGX_specular(normal, wo, wi[:, None], mat["roughness"], mat["fresnel"]).squeeze(1)
-            # nw_brdf *= (mat["albedo"] / math.pi + specular) * ((wi * normal).sum(-1).abs() / pdf).unsqueeze(1)
-            nw_brdf *= material.f(wo, wi)
+                rays_d = wi
 
     L = L.reshape(-1, spp, 3).mean(1)
-    L = torch.clamp(L, 0, 1)
-    L = linear2srgb_torch(L)
+    # L = linear2srgb_torch(L)
 
-    if validate:
+    if validate and isinstance(positions, torch.Tensor):
         positions = positions.reshape(-1, spp, 3).mean(1)
-        albedo = albedo.reshape(-1, spp, 3).mean(1)
 
     ret_dict = {
         "L": L,
@@ -172,7 +161,6 @@ def path_tracing(scene,
     if validate:
         ret_dict.update({
             "position": positions,
-            'albedo': albedo,
         })
     return ret_dict
 
@@ -195,35 +183,49 @@ if __name__ == "__main__":
     scene = mi.load_dict(scene_dict)
 
     # load camera
-    W, H = 640, 480
+    W, H = 640, 640
     fov_y = 40
-    eye = torch.tensor([10, 0, 0], dtype=torch.float32)
+    eye = torch.tensor([-4, 0, 0], dtype=torch.float32)
     at = torch.tensor([0, 0, 0], dtype=torch.float32)
     up = torch.tensor([0, 0, 1], dtype=torch.float32)
     # eye = torch.tensor([10, 10, -5], dtype=torch.float32)
     # at = torch.tensor([0, 0, -1], dtype=torch.float32)
     # up = torch.tensor([0, 0, -1], dtype=torch.float32)
 
-    # NOTE: now cope with only one object, need to be modified
-    mat = DiffuseBRDF(dict())
-
     fov_x = 2 * np.arctan(np.tan(fov_y * 0.5) * W / H)
     focal = (H * 0.5) / np.tan(fov_y * 0.5)
 
     directions = get_ray_directions(H, W, [focal, focal])
     rays_o, rays_d, dxdu, dydv = get_rays(directions, lookAt(eye, at, up), focal)
+    # rays_d is now going out from camera image plane to camera position
+    # print(rays_d.shape)
+    # print(rays_d[:, 0].min(), rays_d[:, 0].max(), rays_d[:, 1].min(), rays_d[:, 1].max(), rays_d[:, 2].min(), rays_d[:, 2].max())
+    # breakpoint()
     device = torch.device("cuda")
-    rays_o = rays_o.to(device)
-    rays_d = rays_d.to(device)
-    dxdu = dxdu.to(device)
-    dydv = dydv.to(device)
+    rays_o, rays_d = rays_o.to(device), rays_d.to(device)
+    dxdu, dydv = dxdu.to(device), dydv.to(device)
+
+    # NOTE: now cope with only one object, need to be modified
+    mat = DiffuseBRDF({
+        "R": 0.8,
+    })
+    # mat = PrincipledBRDF({
+    #     "base_color": [0.5, 0.5, 0.5],
+    #     "roughness": 0.,
+    # })
+    light = UniformInfiniteLight({
+        "scale": 1.0,
+    })
+    mat = mat.to(device)
+    light = light.to(device)
+
     # render
     spp = 16
     depth = 4
-    batch = 640 * 480
+    batch = 640 * 640
     result = torch.zeros((len(rays_o), 3), device=rays_o.device)
     for i in range(0, len(rays_o), batch):
-        current_result = path_tracing(scene, mat, rays_o[i:i + batch],
+        current_result = path_tracing(scene, mat, light, rays_o[i:i + batch],
                                       rays_d[i:i + batch], dxdu[i:i + batch],
                                       dydv[i:i + batch], spp, depth)
         result[i:i + batch] = current_result["L"]

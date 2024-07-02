@@ -3,22 +3,25 @@ import torch.nn as nn
 from sample_utils import *
 
 
-class LightSampleContext:
+class LightSampleContext(nn.Module):
     def __init__(self, p, n, ns):
+        super(LightSampleContext, self).__init__()
         self.p = p
         self.n = n
         self.ns = ns # shading normal
 
 
-class LightLiSample:
+class LightLiSample(nn.Module):
     def __init__(self, L, wi, pdf):
+        super(LightLiSample, self).__init__()
         self.L = L
         self.wi = wi
         self.pdf = pdf
 
 
-class UniformInfiniteLight:
+class UniformInfiniteLight(nn.Module):
     def __init__(self, props: dict):
+        super(UniformInfiniteLight, self).__init__()
         self.color = nn.Parameter(torch.tensor(
             props.get("color", [1.0, 1.0, 1.0]), dtype=torch.float32))
         self.scale = nn.Parameter(torch.tensor(
@@ -26,7 +29,7 @@ class UniformInfiniteLight:
 
     def Le(self, ray_dir):
         ret = self.color * self.scale
-        ret = ret.expand(ray_dir.shape[0])
+        ret = ret.repeat(ray_dir.shape[0], 1)
         return ret
 
     def SampleLi(self, ctx: LightSampleContext, u):
