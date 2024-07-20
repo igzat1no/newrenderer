@@ -1,9 +1,11 @@
 import math
+from re import T
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from kornia.utils.grid import create_meshgrid
+from math_utils import Lerp
 
 
 def same_hemisphere(W1, W2):
@@ -191,7 +193,96 @@ def GGX_specular(
     return spec
 
 
+
+class MIPMap(nn.Module):
+
+    def __init__(self, height, width, img, doTri=False, maxAniso=8.0):
+
+        self.doTri = doTri
+        self.maxAniso = maxAniso
+        self.res = [height, width]
+
+        nLevels = 1 + int(math.log2(max(height, width)))
+        self.pyramid = []
+        self.pyramid.append(img)
+        pool_layer = torch.nn.AvgPool2d(kernel_size=2, stride=2)
+        for i in range(1, nLevels - 1):
+            input_tensor = self.pyramid[i - 1]
+            output_tensor = pool_layer(input_tensor.permute(2, 0, 1).unsqueeze(0))
+            self.pyramid.append(output_tensor.squeeze(0).permute(1, 2, 0))
+        last_tensor = self.pyramid[-1]
+        self.pyramid.append(torch.mean(last_tensor, dim=1, keepdim=True))
+
+        import imageio.v3 as imageio
+        outimg = torch.zeros(1024, 1024, 3)
+        ind = 0
+        for i in range(0, nLevels):
+            img = self.pyramid[i]
+            img = torch.clamp(img, 0, 1)
+            img = img * 255
+            outimg[ind:ind + img.shape[0], :img.shape[1], :] = img
+            ind += img.shape[0]
+
+        self.weightLUTsize = 128
+        self.weightLut = []
+        for i in range(self.weightLUTsize):
+            r2 = i / (self.weightLUTsize - 1)
+            self.weightLut.append(math.exp(-r2 * 2) - math.exp(-2))
+
+    def Levels(self):
+        return len(self.pyramid)
+
+    def triangle(self, level, st):
+        level = np.clip(level, 0, self.Levels() - 1)
+        s = st[..., 0] * self.pyramid[level].shape[0] - 0.5
+        t = st[..., 1] * self.pyramid[level].shape[1] - 0.5
+        s0 = torch.floor(s).to(torch.int32)
+        t0 = torch.floor(t).to(torch.int32)
+        ds = s - s0
+        dt = t - t0
+        ds = ds[..., None]
+        dt = dt[..., None]
+        ind1 = torch.stack((s0, t0), dim=-1)
+        ind2 = torch.stack((s0 + 1, t0), dim=-1)
+        ind3 = torch.stack((s0, t0 + 1), dim=-1)
+        ind4 = torch.stack((s0 + 1, t0 + 1), dim=-1)
+
+        def process(ind):
+            print(ind.shape)
+            flag = (ind[..., 0] == self.pyramid[level].shape[0])
+            print(flag.shape)
+            if flag.sum() > 0:
+                ind[flag, 0] = 0
+            flag = (ind[..., 1] == self.pyramid[level].shape[1])
+            print(flag.shape)
+            if flag.sum() > 0:
+                ind[flag, 1] = 0
+
+        process(ind1)
+        process(ind2)
+        process(ind3)
+        process(ind4)
+
+        return (1 - ds) * (1 - dt) * self.pyramid[level][ind1[..., 0], ind1[..., 1]] + \
+                (1 - ds) * dt * self.pyramid[level][ind2[..., 0], ind2[..., 1]] + \
+                ds * (1 - dt) * self.pyramid[level][ind3[..., 0], ind3[..., 1]] + \
+                ds * dt * self.pyramid[level][ind4[..., 0], ind4[..., 1]]
+
+    def Lookup(self, st, width=0.):
+        print("shaithisnaidnmweimt")
+        level = self.Levels() - 1 + math.log2(max(width, 1e-8))
+        if level < 0:
+            return self.triangle(0, st)
+        elif level >= self.Levels() - 1:
+            return self.pyramid[self.Levels() - 1][0, 0] * torch.ones_like(st)
+        else:
+            iLevel = int(level)
+            delta = level - iLevel
+            return Lerp(delta, self.triangle(iLevel, st), self.triangle(iLevel + 1, st))
+
+
 if __name__ == '__main__':
+
     eye = torch.tensor([10, 10, -5], dtype=torch.float32)
     at = torch.tensor([0, 0, -1], dtype=torch.float32)
     up = torch.tensor([0, 0, -1], dtype=torch.float32)

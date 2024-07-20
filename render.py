@@ -13,6 +13,17 @@ from light import *
 mi.set_variant("cuda_ad_rgb")
 
 
+# recursively look for "to_world" and "filename" keys
+def process_dict(scene_dir, d):
+    for k, v in d.items():
+        if type(v) == dict and "to_world" in v.keys():
+            d[k]["to_world"] = mi.ScalarTransform4f(v["to_world"])
+        if type(v) == dict and "filename" in v.keys():
+            d[k]["filename"] = os.path.join(scene_dir, v["filename"])
+        if type(v) == dict:
+            process_dict(scene_dir, v)
+
+
 def ray_intersect(scene, xs, ds):
     """ warpper of mitsuba ray-mesh intersection
     Args:
@@ -145,7 +156,7 @@ def path_tracing(scene,
                     pdf = torch.tensor(0.5 / math.pi, device=device).repeat(wi.shape[0], 1)
                     # dot_prod = torch.einsum("bi,bi->b", wi, normal)
                     dot_prod = Dot(wi, normal)
-                    beta *= f * dot_prod.abs().unsqueeze(1) / pdf
+                    beta *= f * dot_prod.abs() / pdf
 
                 rays_d = wi
 
@@ -166,34 +177,36 @@ def path_tracing(scene,
 
 
 if __name__ == "__main__":
-    scene_dir = "/home/lizongtai/research/scenes/simple/"
+
+    scene_dir = "/home/lizongtai/research/scenes/combine/"
     scene_path = os.path.join(scene_dir, "scene.json")
 
     # load scene
     scene_dict = json.load(open(scene_path, "r"))
     print(scene_dict)
 
-    for k, v in scene_dict.items():
-        if type(v) == dict and "to_world" in v.keys():
-            scene_dict[k]["to_world"] = mi.ScalarTransform4f(v["to_world"])
-        if type(v) == dict and "filename" in v.keys():
-            scene_dict[k]["filename"] = os.path.join(scene_dir, v["filename"])
+    process_dict(scene_dir, scene_dict)
 
     # render the scene
     scene = mi.load_dict(scene_dict)
 
+    # load envmap
+    envmap_path = scene_dict["light"]["filename"]
+    envmap = imageio.imread(envmap_path)
+    envmap = torch.tensor(envmap, dtype=torch.float32)
+
     # load camera
     W, H = 640, 640
     fov_y = 40
-    eye = torch.tensor([-4, 0, 0], dtype=torch.float32)
-    at = torch.tensor([0, 0, 0], dtype=torch.float32)
+    eye = torch.tensor([40, -12.5, 0], dtype=torch.float32)
+    at = torch.tensor([0, -12.5, 0], dtype=torch.float32)
     up = torch.tensor([0, 0, 1], dtype=torch.float32)
     # eye = torch.tensor([10, 10, -5], dtype=torch.float32)
     # at = torch.tensor([0, 0, -1], dtype=torch.float32)
     # up = torch.tensor([0, 0, -1], dtype=torch.float32)
 
-    fov_x = 2 * np.arctan(np.tan(fov_y * 0.5) * W / H)
-    focal = (H * 0.5) / np.tan(fov_y * 0.5)
+    fov_x = 2 * np.arctan(np.tan(fov_y * 0.5 / 180 * np.pi) * W / H) * 180 / np.pi
+    focal = (H * 0.5) / np.tan(fov_y * 0.5 / 180 * np.pi)
 
     directions = get_ray_directions(H, W, [focal, focal])
     rays_o, rays_d, dxdu, dydv = get_rays(directions, lookAt(eye, at, up), focal)
@@ -206,21 +219,19 @@ if __name__ == "__main__":
     dxdu, dydv = dxdu.to(device), dydv.to(device)
 
     # NOTE: now cope with only one object, need to be modified
-    mat = DiffuseBRDF({
-        "R": 0.8,
+    mat = PrincipledBRDF({
+        "base_color": [0.5, 0.5, 0.5],
+        "roughness": 0.,
     })
-    # mat = PrincipledBRDF({
-    #     "base_color": [0.5, 0.5, 0.5],
-    #     "roughness": 0.,
-    # })
-    light = UniformInfiniteLight({
-        "scale": 1.0,
+    light = ImageInfiniteLight({
+        "image": envmap,
+        "scale": 1,
     })
     mat = mat.to(device)
     light = light.to(device)
 
     # render
-    spp = 16
+    spp = 128
     depth = 4
     batch = 640 * 640
     result = torch.zeros((len(rays_o), 3), device=rays_o.device)

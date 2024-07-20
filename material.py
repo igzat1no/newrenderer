@@ -98,40 +98,40 @@ class DisneyDiffuse(nn.Module):
         return BSDFSample(f, wi, pdf)
 
 
-class DisneyMetal(nn.Module):
-    def __init__(self, props: dict):
-        super(DisneyMetal, self).__init__()
-        self.baseColor = nn.Parameter(torch.tensor(
-            props.get("baseColor", [1.0, 1.0, 1.0]), dtype=torch.float32))
-        self.roughness = nn.Parameter(torch.tensor(
-            props.get("roughness", 0.5), dtype=torch.float32))
-        self.specular = nn.Parameter(torch.tensor(
-            props.get("specular", 0.5), dtype=torch.float32))
-        self.metallic = nn.Parameter(torch.tensor(
-            props.get("metallic", 0.0), dtype=torch.float32))
+# class DisneyMetal(nn.Module):
+#     def __init__(self, props: dict):
+#         super(DisneyMetal, self).__init__()
+#         self.baseColor = nn.Parameter(torch.tensor(
+#             props.get("baseColor", [1.0, 1.0, 1.0]), dtype=torch.float32))
+#         self.roughness = nn.Parameter(torch.tensor(
+#             props.get("roughness", 0.5), dtype=torch.float32))
+#         self.specular = nn.Parameter(torch.tensor(
+#             props.get("specular", 0.5), dtype=torch.float32))
+#         self.metallic = nn.Parameter(torch.tensor(
+#             props.get("metallic", 0.0), dtype=torch.float32))
 
-    def f(self, wo, wi):
-        h = (wo + wi) / (wo + wi).norm(dim=1, keepdim=True)
-        baseColor = self.baseColor.repeat(wo.shape[0], 1).to(wo.device)
-        Ks =
-        Fm = self.baseColor + (1 - self.baseColor) * (1 - Dot(h, wo).abs()).pow(5)
-        alpha = (self.roughness * self.roughness).clamp_min(0.001)
-        NoH = wo[:, 2].unsqueeze(-1)
-        tmp = NoH.pow(2) * (alpha.pow(2) - 1) + 1
-        Dm = alpha.pow(2) / (math.pi * tmp.pow(2))
-        Gm = GSmith(wi, alpha) * GSmith(wo, alpha)
-        return Fm * Dm * Gm / (4 * wi[:, 2].abs().unsqueeze(-1))
+#     def f(self, wo, wi):
+#         h = (wo + wi) / (wo + wi).norm(dim=1, keepdim=True)
+#         baseColor = self.baseColor.repeat(wo.shape[0], 1).to(wo.device)
+#         Ks =
+#         Fm = self.baseColor + (1 - self.baseColor) * (1 - Dot(h, wo).abs()).pow(5)
+#         alpha = (self.roughness * self.roughness).clamp_min(0.001)
+#         NoH = wo[:, 2].unsqueeze(-1)
+#         tmp = NoH.pow(2) * (alpha.pow(2) - 1) + 1
+#         Dm = alpha.pow(2) / (math.pi * tmp.pow(2))
+#         Gm = GSmith(wi, alpha) * GSmith(wo, alpha)
+#         return Fm * Dm * Gm / (4 * wi[:, 2].abs().unsqueeze(-1))
 
-    def PDF(self, wo, wi):
-        h = (wo + wi) / (wo + wi).norm(dim=1, keepdim=True)
-        NoI = wo[:, 2].unsqueeze(-1)
-        NoO = wi[:, 2].unsqueeze(-1)
-        NoH = h[:, 2].unsqueeze(-1)
-        flag = (NoO <= 0) | (NoH <= 0)
-        spec = 
+#     def PDF(self, wo, wi):
+#         h = (wo + wi) / (wo + wi).norm(dim=1, keepdim=True)
+#         NoI = wo[:, 2].unsqueeze(-1)
+#         NoO = wi[:, 2].unsqueeze(-1)
+#         NoH = h[:, 2].unsqueeze(-1)
+#         flag = (NoO <= 0) | (NoH <= 0)
+#         spec =
 
 
 if __name__ == "__main__":
-    test_mat = DisneyMetal({})
+    # test_mat = DisneyMetal({})
     wi, wo = torch.ones((10, 3)), torch.ones((10, 3))
-    print(test_mat.f(wo, wi))
+    # print(test_mat.f(wo, wi))
